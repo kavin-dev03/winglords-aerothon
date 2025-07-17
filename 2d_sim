@@ -1,0 +1,290 @@
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import random
+import time
+import numpy as np
+import pandas as pd # Import pandas for CSV reading
+from matplotlib.widgets import Button # Import Button widget
+
+# --- System Parameters ---
+MAX_FUEL_CAPACITY = 1000  # Liters
+INITIAL_FUEL_LEVEL = 800  # Liters
+MAX_FUEL_PRESSURE = 100   # PSI
+MAX_FUEL_FLOW_RATE = 50   # Liters/minute
+MAX_ENGINE_RPM = 3000     # RPM
+
+# --- Simulation Variables ---
+current_fuel_level = INITIAL_FUEL_LEVEL
+current_fuel_pressure = 50
+current_fuel_flow_rate = 20
+engine_rpm = 1500
+simulation_time = 0
+animation_running = True # Flag to control animation state
+
+# --- External Data Input ---
+# Load RPM data from the provided CSV file
+external_rpm_data = []
+try:
+    # Assuming 'fuel_data.csv' contains a column named 'RPM'
+    # If your CSV has a different column name for RPM, please change 'RPM' below.
+    # If it doesn't have headers, you might need to use header=None and specify the column index.
+    df = pd.read_csv('fuel_data.csv')
+    if 'RPM' in df.columns:
+        external_rpm_data = df['RPM'].tolist()
+    elif len(df.columns) > 0:
+        # Fallback: if no 'RPM' column, try to use the first column
+        print("Warning: 'RPM' column not found. Using the first column from CSV for RPM data.")
+        external_rpm_data = df.iloc[:, 0].tolist()
+    else:
+        print("Error: CSV file is empty or has no suitable columns for RPM data.")
+
+    print(f"Loaded {len(external_rpm_data)} RPM data points from 'fuel_data.csv'.")
+except FileNotFoundError:
+    print("Error: 'fuel_data.csv' not found. Please ensure the file is in the same directory as the script.")
+    print("Simulation will proceed with default random RPM generation.")
+except Exception as e:
+    print(f"An error occurred while reading 'fuel_data.csv': {e}")
+    print("Simulation will proceed with default random RPM generation.")
+
+# If you want to loop the data, set this to True.
+# If False, the simulation will stop or revert to random RPM once data runs out.
+LOOP_EXTERNAL_DATA = True
+
+# --- Matplotlib Setup ---
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10)) # Two subplots for different visualizations
+fig.suptitle('Helicopter Fuel Injection System Digital Twin (CSV Data-Driven RPM)', fontsize=16)
+
+# Subplot 1: Dynamic Schematic Representation
+ax1.set_xlim(0, 100)
+ax1.set_ylim(0, 100)
+ax1.axis('off') # Hide axes for a cleaner look
+ax1.set_aspect('equal', adjustable='box') # Ensure aspect ratio is equal for proper shapes
+
+# --- Schematic Components ---
+
+# Tank: Rectangle (60x40 units)
+TANK_X, TANK_Y = 10, 30
+TANK_WIDTH, TANK_HEIGHT = 20, 40
+fuel_tank_outline = plt.Rectangle((TANK_X, TANK_Y), TANK_WIDTH, TANK_HEIGHT, color='gray', ec='black', lw=2)
+ax1.add_patch(fuel_tank_outline)
+# Fuel fill within the tank
+fuel_fill_height = (current_fuel_level / MAX_FUEL_CAPACITY) * TANK_HEIGHT
+fuel_fill_rect = plt.Rectangle((TANK_X, TANK_Y + (TANK_HEIGHT - fuel_fill_height)), TANK_WIDTH, fuel_fill_height, color='blue', alpha=0.7)
+ax1.add_patch(fuel_fill_rect)
+fuel_text = ax1.text(TANK_X + TANK_WIDTH/2, TANK_Y + TANK_HEIGHT + 5, f'Fuel: {current_fuel_level:.1f} L', ha='center', va='bottom', fontsize=12, weight='bold')
+ax1.text(TANK_X + TANK_WIDTH/2, TANK_Y - 5, 'Fuel Tank', ha='center', va='top', fontsize=10)
+
+# Pump: Circle (10-unit radius)
+PUMP_X, PUMP_Y = 50, 50
+PUMP_RADIUS = 7 # Adjusted for better visual scale
+pump_circle = plt.Circle((PUMP_X, PUMP_Y), PUMP_RADIUS, color='green', ec='black', lw=2)
+ax1.add_patch(pump_circle)
+pump_text = ax1.text(PUMP_X, PUMP_Y - PUMP_RADIUS - 5, 'Pump', ha='center', va='top', fontsize=10)
+pressure_text = ax1.text(PUMP_X, PUMP_Y + PUMP_RADIUS + 5, f'Pressure: {current_fuel_pressure:.1f} PSI', ha='center', va='bottom', fontsize=12)
+
+
+# Injector: Triangle (10x10 units)
+INJECTOR_X, INJECTOR_Y = 80, 50
+INJECTOR_SIZE = 10
+injector_triangle = plt.Polygon([(INJECTOR_X, INJECTOR_Y - INJECTOR_SIZE/2),
+                                 (INJECTOR_X + INJECTOR_SIZE, INJECTOR_Y),
+                                 (INJECTOR_X, INJECTOR_Y + INJECTOR_SIZE/2)],
+                                color='gray', ec='black', lw=2)
+ax1.add_patch(injector_triangle)
+injector_text = ax1.text(INJECTOR_X + INJECTOR_SIZE/2, INJECTOR_Y - INJECTOR_SIZE/2 - 5, 'Injector', ha='center', va='top', fontsize=10)
+flow_text = ax1.text(INJECTOR_X + INJECTOR_SIZE/2, INJECTOR_Y + INJECTOR_SIZE/2 + 5, f'Flow: {current_fuel_flow_rate:.1f} L/min', ha='center', va='bottom', fontsize=12)
+
+
+# Fuel Line: Animated arrow moving from tank to pump to injector.
+# Define path points for the fuel line
+fuel_line_path = [
+    (TANK_X + TANK_WIDTH, TANK_Y + TANK_HEIGHT/2), # Right side of tank
+    (PUMP_X - PUMP_RADIUS, PUMP_Y),                 # Left side of pump
+    (PUMP_X + PUMP_RADIUS, PUMP_Y),                 # Right side of pump
+    (INJECTOR_X, INJECTOR_Y)                        # Left side of injector
+]
+
+# Draw static fuel lines
+ax1.plot([fuel_line_path[0][0], fuel_line_path[1][0]], [fuel_line_path[0][1], fuel_line_path[1][1]], 'k-', lw=2)
+ax1.plot([fuel_line_path[2][0], fuel_line_path[3][0]], [fuel_line_path[2][1], fuel_line_path[3][1]], 'k-', lw=2)
+
+# Animated arrow (using a small circle for simplicity, can be a custom arrow patch)
+arrow_marker_size = 8 # Increased size for better visibility
+fuel_flow_arrow, = ax1.plot([], [], 'o', color='gold', markersize=arrow_marker_size)
+arrow_position_index = 0 # To track position along the path
+
+# Engine RPM Display (positioned near injector for logical flow)
+rpm_display = ax1.text(INJECTOR_X + INJECTOR_SIZE + 10, INJECTOR_Y, f'Engine RPM: {engine_rpm}',
+                       ha='left', va='center', fontsize=14,
+                       bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="black", lw=1))
+
+# Simulation Time Display
+time_display = ax1.text(50, 95, f'Time: {simulation_time} s', ha='center', va='top', fontsize=12, weight='bold', color='purple')
+
+
+# Subplot 2: Time-series data for Fuel Level and RPM
+time_data = []
+fuel_level_data = []
+rpm_data = []
+
+line_fuel, = ax2.plot([], [], 'g-', label='Fuel Level (L)')
+line_rpm, = ax2.plot([], [], 'r--', label='Engine RPM')
+ax2.set_xlabel('Time (s)')
+ax2.set_ylabel('Value')
+ax2.set_title('Historical Data')
+ax2.grid(True)
+ax2.legend()
+
+# --- Play/Pause Button ---
+# Define the position for the button [left, bottom, width, height] in figure coordinates
+ax_button = fig.add_axes([0.45, 0.01, 0.1, 0.04]) # Positioned at the bottom center
+button = Button(ax_button, 'Pause/Play')
+
+# --- Simulation Logic ---
+def update_simulation(frame):
+    global current_fuel_level, current_fuel_pressure, current_fuel_flow_rate, engine_rpm, simulation_time, arrow_position_index
+
+    # Only update simulation parameters if animation is running
+    if animation_running:
+        # Simulate time passing
+        simulation_time += 1 # Each frame represents 1 second
+
+        # --- Data Input for RPM ---
+        # Use external data for RPM if available
+        if external_rpm_data:
+            data_index = (simulation_time - 1) % len(external_rpm_data) # Loop through data
+            if not LOOP_EXTERNAL_DATA and (simulation_time - 1) >= len(external_rpm_data):
+                # If not looping and data runs out, stop updating RPM from external data
+                # The RPM will hold its last value from the dataset
+                pass
+            else:
+                engine_rpm = external_rpm_data[data_index]
+        else:
+            # Fallback to random RPM if no external data was loaded successfully
+            engine_rpm_change = random.uniform(-100, 100)
+            engine_rpm = max(500, min(MAX_ENGINE_RPM, engine_rpm + engine_rpm_change))
+
+
+        # Simulate fuel consumption based on RPM
+        base_consumption = 0.2 # Liters/second at idle (increased)
+        rpm_consumption_factor = 0.00008 # Liters/second per RPM (increased)
+        fuel_consumed_per_second = base_consumption + (engine_rpm * rpm_consumption_factor)
+
+        current_fuel_level -= fuel_consumed_per_second
+        if current_fuel_level < 0:
+            current_fuel_level = 0
+            # In a real application, you'd trigger a "fuel empty" alert here
+            # For a continuous simulation, we just cap it at 0.
+
+        # Simulate fuel pump and injector behavior
+        target_flow_from_rpm = (engine_rpm / MAX_ENGINE_RPM) * MAX_FUEL_FLOW_RATE
+        target_pressure_from_rpm = (engine_rpm / MAX_ENGINE_RPM) * MAX_FUEL_PRESSURE
+
+        fuel_level_factor = current_fuel_level / MAX_FUEL_CAPACITY
+        current_fuel_flow_rate = target_flow_from_rpm * fuel_level_factor * random.uniform(0.8, 1.2) # More noise
+        current_fuel_pressure = target_pressure_from_rpm * fuel_level_factor * random.uniform(0.8, 1.2) # More noise
+
+        current_fuel_flow_rate = max(0, min(MAX_FUEL_FLOW_RATE, current_fuel_flow_rate))
+        current_fuel_pressure = max(0, min(MAX_FUEL_PRESSURE, current_fuel_pressure))
+
+        # --- Update Visualizations ---
+
+        # Update fuel tank fill
+        fuel_fill_height = (current_fuel_level / MAX_FUEL_CAPACITY) * TANK_HEIGHT
+        fuel_fill_rect.set_y(TANK_Y + (TANK_HEIGHT - fuel_fill_height))
+        fuel_fill_rect.set_height(fuel_fill_height)
+        fuel_fill_rect.set_color('blue' if current_fuel_level > MAX_FUEL_CAPACITY * 0.2 else 'orange' if current_fuel_level > 0 else 'red')
+        fuel_text.set_text(f'Fuel: {current_fuel_level:.1f} L')
+
+        # Update pump color based on pressure
+        if current_fuel_pressure > 70:
+            pump_circle.set_color('red')
+        elif current_fuel_pressure > 30:
+            pump_circle.set_color('yellow')
+        else:
+            pump_circle.set_color('green')
+        pressure_text.set_text(f'Pressure: {current_fuel_pressure:.1f} PSI')
+
+        # Update flow rate text near injector
+        flow_text.set_text(f'Flow: {current_fuel_flow_rate:.1f} L/min')
+
+        # Update RPM display
+        rpm_display.set_text(f'Engine RPM: {int(engine_rpm)}')
+
+        # Update Simulation Time Display
+        time_display.set_text(f'Time: {simulation_time} s')
+
+        # Animate fuel flow arrow
+        total_path_length = 0
+        segment_lengths = []
+        for i in range(len(fuel_line_path) - 1):
+            p1 = np.array(fuel_line_path[i])
+            p2 = np.array(fuel_line_path[i+1])
+            segment_len = np.linalg.norm(p2 - p1)
+            segment_lengths.append(segment_len)
+            total_path_length += segment_len
+
+        # Simulate flow speed based on current_fuel_flow_rate (higher flow = faster arrow)
+        flow_speed_factor = current_fuel_flow_rate / MAX_FUEL_FLOW_RATE
+        arrow_step_per_frame = 0.1 + (flow_speed_factor * 0.2)
+
+        arrow_position_index += arrow_step_per_frame
+
+        if arrow_position_index >= total_path_length:
+            arrow_position_index = 0 # Reset to start of path
+
+        current_length = 0
+        current_segment_idx = 0
+        for i, seg_len in enumerate(segment_lengths):
+            if arrow_position_index < current_length + seg_len:
+                current_segment_idx = i
+                break
+            current_length += seg_len
+
+        segment_progress = (arrow_position_index - current_length) / segment_lengths[current_segment_idx]
+        
+        arrow_x = fuel_line_path[current_segment_idx][0] + (fuel_line_path[current_segment_idx+1][0] - fuel_line_path[current_segment_idx][0]) * segment_progress
+        arrow_y = fuel_line_path[current_segment_idx][1] + (fuel_line_path[current_segment_idx+1][1] - fuel_line_path[current_segment_idx][1]) * segment_progress
+
+        fuel_flow_arrow.set_data([arrow_x], [arrow_y])
+
+
+        # Update time-series data
+        time_data.append(simulation_time)
+        fuel_level_data.append(current_fuel_level)
+        rpm_data.append(engine_rpm)
+
+        max_history_points = 100
+        if len(time_data) > max_history_points:
+            time_data.pop(0)
+            fuel_level_data.pop(0)
+            rpm_data.pop(0)
+
+        line_fuel.set_data(time_data, fuel_level_data)
+        line_rpm.set_data(time_data, rpm_data)
+        ax2.set_xlim(max(0, simulation_time - max_history_points), simulation_time)
+        ax2.set_ylim(0, MAX_FUEL_CAPACITY + 100)
+        ax2.set_ylabel('Value (L / RPM)')
+
+    # Return all artists that might have changed, even if animation is paused
+    return fuel_fill_rect, fuel_text, pump_circle, pressure_text, flow_text, rpm_display, time_display, fuel_flow_arrow, line_fuel, line_rpm
+
+# Create the animation
+ani = animation.FuncAnimation(fig, update_simulation, interval=50, blit=True, cache_frame_data=False)
+
+# --- Button Callback Function ---
+def toggle_animation(event):
+    global animation_running
+    if animation_running:
+        ani.event_source.stop() # Pause the animation
+        button.label.set_text('Play')
+    else:
+        ani.event_source.start() # Resume the animation
+        button.label.set_text('Pause')
+    animation_running = not animation_running
+
+# Connect the button click event to the toggle_animation function
+button.on_clicked(toggle_animation)
+
+plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to make space for the button
+plt.show()
